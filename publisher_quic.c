@@ -1,0 +1,92 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
+#include "mensaje.h"
+ 
+#define PORT           7070
+#define NUM_MENSAJES   10
+#define MAX_REINTENTOS 5
+#define TIMEOUT_SEG    2   /* segundos esperando ACK */
+ 
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Uso: %s <tema>\n", argv[0]);
+        printf("Temas validos: PartidoA o PartidoB\n");
+        return 1;
+    }
+ 
+    char *tema = argv[1];
+    if (strcmp(tema, "PartidoA") != 0 && strcmp(tema, "PartidoB") != 0) {
+        printf("Tema invalido. Use PartidoA o PartidoB\n");
+        return 1;
+    }
+ 
+    int sockfd;
+    struct sockaddr_in broker;
+    socklen_t len = sizeof(broker);
+    Mensaje msg, ack;
+ 
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) { perror("socket"); return 1; }
+ 
+    struct timeval tv = { .tv_sec = TIMEOUT_SEG, .tv_usec = 0 };
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+ 
+    memset(&broker, 0, sizeof(broker));
+    broker.sin_family      = AF_INET;
+    broker.sin_port        = htons(PORT);
+    broker.sin_addr.s_addr = inet_addr("127.0.0.1");
+ 
+    printf("[QUIC-Publisher] Publicando en tema=%s\n", tema);
+ 
+    for (uint32_t i = 1; i <= NUM_MENSAJES; i++) {
+        memset(&msg, 0, sizeof(Mensaje));
+        strcpy(msg.tipo, "PUBLISH");
+        strcpy(msg.tema, tema);
+        msg.seq_num = i;
+ 
+        if (strcmp(tema, "PartidoA") == 0)
+            snprintf(msg.contenido, sizeof(msg.contenido),
+                     "PartidoA - evento %u: jugada importante", i);
+        else
+            snprintf(msg.contenido, sizeof(msg.contenido),
+                     "PartidoB - evento %u: actualizacion del partido", i);
+ 
+        int ack_ok   = 0;
+        int intentos = 0;
+ 
+        while (!ack_ok && intentos < MAX_REINTENTOS) {
+            intentos++;
+            sendto(sockfd, &msg, sizeof(Mensaje), 0,
+                   (struct sockaddr *)&broker, sizeof(broker));
+ 
+            printf("[QUIC-Publisher] Enviado seq=%u intento=%d contenido=%s\n",
+                   i, intentos, msg.contenido);
+ 
+            int n = recvfrom(sockfd, &ack, sizeof(Mensaje), 0,
+                             (struct sockaddr *)&broker, &len);
+ 
+            if (n > 0 && strcmp(ack.tipo, "ACK") == 0 &&
+                ack.seq_num == i) {
+                printf("[QUIC-Publisher] ACK recibido seq=%u\n", ack.seq_num);
+                ack_ok = 1;
+            } else {
+                printf("[QUIC-Publisher] Timeout o ACK invalido, "
+                       "retransmitiendo seq=%u...\n", i);
+            }
+        }
+ 
+        if (!ack_ok)
+            printf("[QUIC-Publisher] FALLO: seq=%u sin ACK tras %d intentos\n",
+                   i, MAX_REINTENTOS);
+ 
+        sleep(1);
+    }
+ 
+    close(sockfd);
+    printf("[QUIC-Publisher] Terminado.\n");
+    return 0;
+}
